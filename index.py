@@ -1,6 +1,8 @@
 from flask import Flask, jsonify, request
 import jwt
 from datetime import datetime
+import json
+import sys
 
 app = Flask(__name__)
 
@@ -43,73 +45,75 @@ def api_decode_jwt():
         return jsonify({"error": "Token is required"}), 400
 
 # ============================================
-# VERCEL SERVERLESS HANDLER
+# VERCEL SERVERLESS HANDLER - FIXED VERSION
 # ============================================
 
-def handler(event, context):
-    """Vercel serverless function entry point"""
-    from io import BytesIO
-    from urllib.parse import urlencode
+from http.server import BaseHTTPRequestHandler
+from io import BytesIO
+from urllib.parse import parse_qs, urlparse
+
+class handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        # Parse URL and query
+        parsed = urlparse(self.path)
+        path = parsed.path
+        query = parse_qs(parsed.query)
+        
+        # Flatten query params (take first value)
+        query_params = {k: v[0] if v else '' for k, v in query.items()}
+        
+        # Build WSGI environ for Flask
+        environ = {
+            'REQUEST_METHOD': 'GET',
+            'SCRIPT_NAME': '',
+            'PATH_INFO': path,
+            'QUERY_STRING': parsed.query,
+            'SERVER_NAME': self.headers.get('Host', 'vercel'),
+            'SERVER_PORT': '443',
+            'HTTP_HOST': self.headers.get('Host', 'vercel'),
+            'wsgi.version': (1, 0),
+            'wsgi.url_scheme': 'https',
+            'wsgi.input': BytesIO(),
+            'wsgi.errors': sys.stderr,
+            'wsgi.multithread': False,
+            'wsgi.multiprocess': False,
+            'wsgi.run_once': True,
+        }
+        
+        # Add headers
+        for key, value in self.headers.items():
+            key_upper = key.upper().replace('-', '_')
+            if key_upper not in ('CONTENT_TYPE', 'CONTENT_LENGTH'):
+                key_upper = f'HTTP_{key_upper}'
+            environ[key_upper] = value
+        
+        # Capture response
+        response_status = [200]
+        response_headers = [{}]
+        response_body = [b'']
+        
+        def start_response(status, headers):
+            response_status[0] = int(status.split()[0])
+            response_headers[0] = dict(headers)
+        
+        # Run Flask
+        try:
+            output = app(environ, start_response)
+            response_body[0] = b''.join(output)
+        except Exception as e:
+            response_status[0] = 500
+            response_body[0] = json.dumps({"error": str(e)}).encode()
+        
+        # Send response
+        self.send_response(response_status[0])
+        for header, value in response_headers[0].items():
+            self.send_header(header, value)
+        self.end_headers()
+        self.wfile.write(response_body[0])
     
-    # Get request details from event
-    method = event.get('httpMethod', 'GET')
-    path = event.get('path', '/')
-    query = event.get('queryStringParameters') or {}
-    headers = event.get('headers') or {}
-    body = event.get('body') or ''
-    
-    if event.get('isBase64Encoded') and body:
-        import base64
-        body = base64.b64decode(body).decode('utf-8')
-    
-    # Build query string
-    query_string = urlencode(query, doseq=True) if query else ''
-    
-    # Build WSGI environ
-    environ = {
-        'REQUEST_METHOD': method,
-        'SCRIPT_NAME': '',
-        'PATH_INFO': path,
-        'QUERY_STRING': query_string,
-        'SERVER_NAME': headers.get('host', 'vercel'),
-        'SERVER_PORT': headers.get('x-forwarded-port', '443'),
-        'HTTP_HOST': headers.get('host', 'vercel'),
-        'CONTENT_TYPE': headers.get('content-type', ''),
-        'CONTENT_LENGTH': str(len(body.encode())) if body else '0',
-        'wsgi.version': (1, 0),
-        'wsgi.url_scheme': headers.get('x-forwarded-proto', 'https'),
-        'wsgi.input': BytesIO(body.encode() if body else b''),
-        'wsgi.errors': BytesIO(),
-        'wsgi.multithread': False,
-        'wsgi.multiprocess': False,
-        'wsgi.run_once': True,
-    }
-    
-    # Add other headers
-    for key, value in headers.items():
-        key_lower = key.lower()
-        if key_lower not in ('content-type', 'content-length', 'host'):
-            environ[f'HTTP_{key.upper().replace("-", "_")}'] = value
-    
-    # Response collector
-    response_status = [200]
-    response_headers = [{}]
-    
-    def start_response(status, headers_list):
-        response_status[0] = int(status.split()[0])
-        response_headers[0] = {k: v for k, v in headers_list}
-    
-    # Execute Flask app
-    response_body = app(environ, start_response)
-    
-    # Collect body
-    body_content = b''.join(response_body).decode('utf-8')
-    
-    return {
-        'statusCode': response_status[0],
-        'headers': response_headers[0],
-        'body': body_content
-    }
+    def log_message(self, format, *args):
+        # Suppress default logging
+        pass
 
 # Local development
 if __name__ == '__main__':
